@@ -1,0 +1,16 @@
+adcVersion				 = 2
+fpaExternalPolar			 = 0
+fpaGfid					 = 201
+fpaGsk					 = 340
+fpaIntegration				 = 623
+fpaOrigin				 = right_left_up_down
+fpaRoiH					 = 480
+fpaRoiW					 = 640
+fpaRoiX					 = 0
+fpaRoiY					 = 0
+fpaSerial				 = 546515111
+fpaTemperatureADC			 = 11402
+fpaTemperatureC				 = 16.0891
+pruAvgLuma				 = 8792
+pruLatency				 = 5
+pruMode					 = 48
