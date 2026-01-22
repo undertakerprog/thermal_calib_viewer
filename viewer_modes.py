@@ -4,7 +4,8 @@ import sys
 import numpy as np
 
 import qt_compat as qt
-from raw_data import read_raw_uint16, scan_raws, scale_diff_signed, scale_uint16_to_uint8
+from raw_data import read_raw_int16, read_raw_uint16, scan_raws, scale_diff_signed, scale_uint16_to_uint8
+from std_calib import std_calib_lhe
 
 
 DEFAULT_DATA_DIR = os.path.join(os.getcwd(), 'data')
@@ -14,11 +15,13 @@ PREVIEW_MAX = 240
 MODE_RAW_LOCAL = 'raw_local'
 MODE_RAW_GLOBAL = 'raw_global'
 MODE_DIFF_MEAN = 'diff_mean'
+MODE_CALIB_INTERP = 'calib_interp'
 
 MODE_LABELS = {
     MODE_RAW_LOCAL: 'Raw (per-frame scale)',
     MODE_RAW_GLOBAL: 'Raw (global scale)',
     MODE_DIFF_MEAN: 'Diff from triple mean',
+    MODE_CALIB_INTERP: 'StdCalib (LHE)',
 }
 
 
@@ -42,6 +45,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.entries = []
         self.duplicates = 0
         self.frame_cache = {}
+        self.frame_cache_i16 = {}
         self.frame_shape = None
         self.pixmap_refs = []
         self.global_scale = None
@@ -95,6 +99,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.mode_combo = qt.QtWidgets.QComboBox()
         for key in (MODE_RAW_LOCAL, MODE_RAW_GLOBAL, MODE_DIFF_MEAN):
             self.mode_combo.addItem(MODE_LABELS[key], key)
+        self.mode_combo.addItem(MODE_LABELS[MODE_CALIB_INTERP], MODE_CALIB_INTERP)
         right_layout.addWidget(self.mode_combo)
 
         temp_label = qt.QtWidgets.QLabel('Temperatures:')
@@ -182,6 +187,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
             self.temp_list.addItem(item)
             item.setSelected(True)
         self.frame_cache.clear()
+        self.frame_cache_i16.clear()
         self.frame_shape = None
         self.pixmap_refs = []
         self.global_scale = None
@@ -198,6 +204,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.duplicates = 0
         self.temp_list.clear()
         self.frame_cache.clear()
+        self.frame_cache_i16.clear()
         self.frame_shape = None
         self.pixmap_refs = []
         self.global_scale = None
@@ -219,6 +226,17 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.frame_cache[entry.path] = frame
         return frame
 
+    def get_frame_i16(self, entry):
+        if entry.path in self.frame_cache_i16:
+            return self.frame_cache_i16[entry.path]
+        frame = read_raw_int16(entry.path)
+        if self.frame_shape is None:
+            self.frame_shape = frame.shape
+        elif frame.shape != self.frame_shape:
+            raise ValueError('Mixed raw dimensions are not supported in one view')
+        self.frame_cache_i16[entry.path] = frame
+        return frame
+
     def compute_global_scale(self, entries):
         if self.global_scale is not None:
             return self.global_scale
@@ -234,12 +252,15 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.global_scale = (p1, p99)
         return self.global_scale
 
+
     def render_tile(self, entries, index):
         mode = self.mode_combo.currentData()
-        entry = entries[index]
-        frame_i = self.get_frame(entry)
-        frame_j = self.get_frame(entries[index + 1])
-        frame_k = self.get_frame(entries[index + 2])
+        entry_prev = entries[index]
+        entry_curr = entries[index + 1]
+        entry_next = entries[index + 2]
+        frame_i = self.get_frame(entry_prev)
+        frame_j = self.get_frame(entry_curr)
+        frame_k = self.get_frame(entry_next)
 
         if mode == MODE_RAW_LOCAL:
             frame_u8 = scale_uint16_to_uint8(frame_i)
@@ -250,6 +271,18 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
             mean = (frame_i.astype(np.float32) + frame_j.astype(np.float32) + frame_k.astype(np.float32)) / 3.0
             diff = frame_i.astype(np.float32) - mean
             frame_u8 = scale_diff_signed(diff)
+        elif mode == MODE_CALIB_INTERP:
+            frame_prev = self.get_frame_i16(entry_prev)
+            frame_curr = self.get_frame_i16(entry_curr)
+            frame_next = self.get_frame_i16(entry_next)
+            frame_u8 = std_calib_lhe(
+                frame_prev,
+                frame_curr,
+                frame_next,
+                entry_prev.temp_value,
+                entry_curr.temp_value,
+                entry_next.temp_value,
+            )
         else:
             frame_u8 = scale_uint16_to_uint8(frame_i)
 
@@ -272,7 +305,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         if tiles == 0:
             status = f'Raw files: {len(self.entries)} | selected: {len(selected)} | tiles: 0'
             if self.duplicates:
-                status += f' | duplicates ignored: {self.duplicates}'
+                status += f' | duplicate temps: {self.duplicates}'
             self.status_label.setText(status)
             return
 
@@ -309,7 +342,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         mode_label = MODE_LABELS.get(self.mode_combo.currentData(), self.mode_combo.currentText())
         status += f' | mode: {mode_label}'
         if self.duplicates:
-            status += f' | duplicates ignored: {self.duplicates}'
+            status += f' | duplicate temps: {self.duplicates}'
         self.status_label.setText(status)
 
 
