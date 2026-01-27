@@ -39,6 +39,18 @@ def align_center():
     return QtCore.Qt.AlignmentFlag.AlignCenter
 
 
+def align_left():
+    if hasattr(QtCore.Qt, 'AlignLeft'):
+        return QtCore.Qt.AlignLeft
+    return QtCore.Qt.AlignmentFlag.AlignLeft
+
+
+def align_right():
+    if hasattr(QtCore.Qt, 'AlignRight'):
+        return QtCore.Qt.AlignRight
+    return QtCore.Qt.AlignmentFlag.AlignRight
+
+
 def qimage_format_grayscale8():
     if hasattr(QtGui.QImage, 'Format_Grayscale8'):
         return QtGui.QImage.Format_Grayscale8
