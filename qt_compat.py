@@ -57,6 +57,32 @@ def qimage_format_grayscale8():
     return QtGui.QImage.Format.Format_Grayscale8
 
 
+def _palette_role(name):
+    if hasattr(QtGui.QPalette, name):
+        return getattr(QtGui.QPalette, name)
+    return getattr(QtGui.QPalette.ColorRole, name)
+
+
+def apply_light_theme(app):
+    if hasattr(app, 'setStyle'):
+        app.setStyle('Fusion')
+    palette = QtGui.QPalette()
+    palette.setColor(_palette_role('Window'), QtGui.QColor(245, 245, 245))
+    palette.setColor(_palette_role('WindowText'), QtGui.QColor(0, 0, 0))
+    palette.setColor(_palette_role('Base'), QtGui.QColor(255, 255, 255))
+    palette.setColor(_palette_role('AlternateBase'), QtGui.QColor(240, 240, 240))
+    palette.setColor(_palette_role('ToolTipBase'), QtGui.QColor(255, 255, 255))
+    palette.setColor(_palette_role('ToolTipText'), QtGui.QColor(0, 0, 0))
+    palette.setColor(_palette_role('Text'), QtGui.QColor(0, 0, 0))
+    palette.setColor(_palette_role('Button'), QtGui.QColor(240, 240, 240))
+    palette.setColor(_palette_role('ButtonText'), QtGui.QColor(0, 0, 0))
+    palette.setColor(_palette_role('BrightText'), QtGui.QColor(255, 0, 0))
+    palette.setColor(_palette_role('Link'), QtGui.QColor(0, 102, 204))
+    palette.setColor(_palette_role('Highlight'), QtGui.QColor(76, 163, 224))
+    palette.setColor(_palette_role('HighlightedText'), QtGui.QColor(0, 0, 0))
+    app.setPalette(palette)
+
+
 def selection_mode_extended():
     if hasattr(QtWidgets.QAbstractItemView, 'ExtendedSelection'):
         return QtWidgets.QAbstractItemView.ExtendedSelection

@@ -827,6 +827,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
 
 def main():
     app = qt.QtWidgets.QApplication(sys.argv)
+    qt.apply_light_theme(app)
     window = RawModesWindow()
     window.show()
     sys.exit(app.exec())
