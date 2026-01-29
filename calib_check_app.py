@@ -1,10 +1,17 @@
 import os
 import sys
+import shutil
 
 import qt_compat as qt
 from raw_data import read_raw_int16, scan_raws
 from std_calib import std_calib_lhe
 from calib_detect import detect_bad
+from calib_generate import (
+    clear_output_dir,
+    copy_original_entries,
+    generate_into_folder,
+    make_output_dir,
+)
 
 
 DEFAULT_DATA_DIR = os.path.join(os.getcwd(), 'data')
@@ -35,6 +42,7 @@ class CalibCheckWindow(qt.QtWidgets.QMainWindow):
         self.frame_shape = None
         self.pixmap_refs = []
         self.current_folder = None
+        self.last_detection = None
         self._build_ui()
         if os.path.isdir(DEFAULT_DATA_DIR):
             self.load_folder(DEFAULT_DATA_DIR)
@@ -86,6 +94,10 @@ class CalibCheckWindow(qt.QtWidgets.QMainWindow):
         self.detect_button.clicked.connect(self.detect_first_bad)
         right_layout.addWidget(self.detect_button)
 
+        self.generate_button = qt.QtWidgets.QPushButton('Generate (poly)')
+        self.generate_button.clicked.connect(self.generate_from_detection)
+        right_layout.addWidget(self.generate_button)
+
         self.detect_label = qt.QtWidgets.QLabel('Detection: not run')
         self.detect_label.setWordWrap(True)
         right_layout.addWidget(self.detect_label)
@@ -121,6 +133,7 @@ class CalibCheckWindow(qt.QtWidgets.QMainWindow):
         self.frame_shape = None
         self.pixmap_refs = []
         self.detect_label.setText('Detection: not run')
+        self.last_detection = None
         self.update_tiles()
 
     def refresh_current(self):
@@ -216,6 +229,7 @@ class CalibCheckWindow(qt.QtWidgets.QMainWindow):
             self.detect_label.setText('Detection: not enough frames')
             return
         result = detect_bad(selected, self.get_frame_i16)
+        self.last_detection = result
         outliers = result.get("outliers") or []
         if outliers:
             outlier_text = ", ".join(entry.temp_str for entry in outliers)
@@ -252,6 +266,47 @@ class CalibCheckWindow(qt.QtWidgets.QMainWindow):
         if outlier_text:
             text += f' | temp outliers: {outlier_text}'
         self.detect_label.setText(text)
+
+    def generate_from_detection(self):
+        if not self.current_folder or not self.entries:
+            self.detect_label.setText('Generate: no folder loaded')
+            return
+        if self.last_detection is None:
+            self.detect_first_bad()
+        if not self.last_detection:
+            return
+        bad_entry = self.last_detection.get("bad_entry")
+        bad_idx = self.last_detection.get("bad_idx")
+        if not bad_entry:
+            self.detect_label.setText('Generate: bad frame not found')
+            return
+        start_temp = float(bad_entry.temp_value)
+        if bad_idx is None or bad_idx <= 0:
+            anchor_temp = start_temp
+        else:
+            anchor_temp = float(self.entries[bad_idx].temp_value)
+        out_dir = make_output_dir(self.current_folder)
+        clear_output_dir(out_dir)
+        skip_temps = [
+            float(entry.temp_value)
+            for entry in self.entries
+            if float(entry.temp_value) < start_temp
+        ]
+        generated = generate_into_folder(
+            self.entries,
+            start_temp,
+            self.get_frame_i16,
+            out_dir,
+            degree=3,
+            step=1.25,
+            anchor_temp=anchor_temp,
+            end_temp=70.0,
+            skip_temps=skip_temps,
+        )
+        copy_original_entries(self.entries, self.current_folder, out_dir, start_temp)
+        self.detect_label.setText(
+            f'Generate: wrote {len(generated)} raws from {anchor_temp:.2f} into {out_dir}'
+        )
 
 
 def main():
