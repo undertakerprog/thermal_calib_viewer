@@ -6,9 +6,7 @@ import numpy as np
 
 
 def convert_celsius_to_adc(temp_c):
-    # From help_functions.h: ConvertCelciusToAdc
     v = (float(temp_c) - 478.17) / (-207.9)
-    # ConvertVoltageToAdc with MODE_SDR_INVERT_16K and v2
     v = ((v - 0.5) * 0.75) + 0.6
     adc_max_value = (np.iinfo(np.int16).max >> 1)
     adc_to_v = 2.0 / adc_max_value

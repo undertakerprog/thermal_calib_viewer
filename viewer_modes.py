@@ -5,6 +5,13 @@ import sys
 import numpy as np
 
 import qt_compat as qt
+from calib_detect import detect_bad
+from calib_generate import (
+    clear_output_dir,
+    copy_original_entries,
+    generate_into_folder,
+    make_output_dir,
+)
 from raw_data import read_raw_int16, read_raw_uint16, scan_raws, scale_diff_signed, scale_uint16_to_uint8
 from std_calib import std_calib_lhe
 
@@ -486,9 +493,9 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.global_scale = None
         self.current_folder = None
         self.plot_window = None
+        self.last_detection = None
         self._build_ui()
-        if os.path.isdir(DEFAULT_DATA_DIR):
-            self.add_folders([DEFAULT_DATA_DIR])
+        # Do not auto-open data folder; start with empty tabs.
 
     def _build_ui(self):
         central = qt.QtWidgets.QWidget()
@@ -497,6 +504,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
 
         left_panel = qt.QtWidgets.QWidget()
         left_layout = qt.QtWidgets.QVBoxLayout(left_panel)
+        left_panel.setSizePolicy(qt.QtWidgets.QSizePolicy.Expanding, qt.QtWidgets.QSizePolicy.Expanding)
 
         self.folder_tabs = qt.QtWidgets.QTabBar()
         self.folder_tabs.setMovable(True)
@@ -515,10 +523,11 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.scroll_area.setWidget(self.tile_container)
         left_layout.addWidget(self.scroll_area, 1)
 
-        main_layout.addWidget(left_panel, 1)
+        main_layout.addWidget(left_panel, 5)
 
         right_panel = qt.QtWidgets.QWidget()
         right_layout = qt.QtWidgets.QVBoxLayout(right_panel)
+        right_panel.setMinimumWidth(360)
 
         self.add_button = qt.QtWidgets.QPushButton('Add folders...')
         self.add_button.clicked.connect(self.open_folders)
@@ -564,20 +573,18 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.temp_plot = TemperaturePlot(show_points=False, point_radius=0, show_labels=False)
         right_layout.addWidget(self.temp_plot, 2)
 
-        temp_label = qt.QtWidgets.QLabel('Temperatures:')
-        right_layout.addWidget(temp_label)
-        self.temp_list = qt.QtWidgets.QListWidget()
-        self.temp_list.setSelectionMode(qt.selection_mode_extended())
-        right_layout.addWidget(self.temp_list, 1)
+        self.detect_button = qt.QtWidgets.QPushButton('Detect first bad')
+        self.detect_button.clicked.connect(self.detect_first_bad)
+        right_layout.addWidget(self.detect_button)
 
-        self.update_button = qt.QtWidgets.QPushButton('Update')
-        self.update_button.clicked.connect(self.refresh_current)
-        right_layout.addWidget(self.update_button)
+        self.generate_button = qt.QtWidgets.QPushButton('Generate (poly)')
+        self.generate_button.clicked.connect(self.generate_from_detection)
+        right_layout.addWidget(self.generate_button)
 
         self.status_label = qt.QtWidgets.QLabel('')
         right_layout.addWidget(self.status_label)
 
-        main_layout.addWidget(right_panel)
+        main_layout.addWidget(right_panel, 4)
 
     def make_tab_title(self, folder):
         base = os.path.basename(os.path.normpath(folder)) or folder
@@ -591,6 +598,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
 
     def add_folders(self, folders):
         added_index = None
+        added_path = None
         seen = {self.folder_tabs.tabData(i) for i in range(self.folder_tabs.count())}
         for folder in folders:
             norm = os.path.normpath(folder)
@@ -603,8 +611,11 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
             self.folder_tabs.setTabData(index, norm)
             if added_index is None:
                 added_index = index
+                added_path = norm
         if added_index is not None:
             self.folder_tabs.setCurrentIndex(added_index)
+            if added_path:
+                self.load_folder(added_path)
 
     def open_folders(self):
         dialog = qt.QtWidgets.QFileDialog(self, 'Select folders')
@@ -643,11 +654,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.current_folder = folder
         self.current_folder_label.setText(folder)
         self.entries, self.duplicates = scan_raws(folder)
-        self.temp_list.clear()
-        for entry in self.entries:
-            item = qt.QtWidgets.QListWidgetItem(entry.temp_str)
-            self.temp_list.addItem(item)
-            item.setSelected(True)
+        self.last_detection = None
         self.temp_plot.set_temperatures([entry.temp_value for entry in self.entries])
         if self.plot_window:
             self.plot_window.set_temperatures([entry.temp_value for entry in self.entries])
@@ -667,7 +674,6 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.current_folder_label.setText('')
         self.entries = []
         self.duplicates = 0
-        self.temp_list.clear()
         self.frame_cache.clear()
         self.frame_cache_i16.clear()
         self.frame_shape = None
@@ -676,6 +682,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.temp_plot.set_temperatures([])
         if self.plot_window:
             self.plot_window.set_temperatures([])
+        self.last_detection = None
         self.clear_tiles()
         self.status_label.setText('No folders opened.')
 
@@ -691,8 +698,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.plot_window = None
 
     def get_selected_entries(self):
-        indices = sorted(self.temp_list.row(item) for item in self.temp_list.selectedItems())
-        return [self.entries[i] for i in indices]
+        return list(self.entries)
 
     def get_frame(self, entry):
         if entry.path in self.frame_cache:
@@ -824,12 +830,88 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
             status += f' | duplicate temps: {self.duplicates}'
         self.status_label.setText(status)
 
+    def detect_first_bad(self):
+        if not self.entries:
+            self.status_label.setText('Detection: no data')
+            return
+        result = detect_bad(self.entries, self.get_frame_i16)
+        self.last_detection = result
+        outliers = result.get("outliers") or []
+        outlier_text = ", ".join(entry.temp_str for entry in outliers) if outliers else ""
+        if result["bad_idx"] is None:
+            text = 'Detection: no bad frames'
+            if result.get("threshold") is not None and result.get("baseline") is not None:
+                text += f' (threshold {result["threshold"]:.2f}, baseline {result["baseline"]:.2f})'
+            if outlier_text:
+                text += f' | temp outliers: {outlier_text}'
+            self.status_label.setText(text)
+            return
+        bad_idx = result["bad_idx"]
+        bad_entry = result["bad_entry"]
+        triple = (
+            f'{self.entries[bad_idx].temp_str} | '
+            f'{self.entries[bad_idx + 1].temp_str} | '
+            f'{self.entries[bad_idx + 2].temp_str}'
+        )
+        reason = result.get("reason", "detected")
+        score = result.get("score")
+        threshold = result.get("threshold")
+        text = f'Detection: bad from {bad_entry.temp_str} ({reason})'
+        if score is not None and threshold is not None:
+            text += f' | score {score:.2f} > {threshold:.2f}'
+        text += f' | triple {triple}'
+        if outlier_text:
+            text += f' | temp outliers: {outlier_text}'
+        self.status_label.setText(text)
+
+    def generate_from_detection(self):
+        if not self.current_folder or not self.entries:
+            self.status_label.setText('Generate: no folder loaded')
+            return
+        if self.last_detection is None:
+            self.detect_first_bad()
+        if not self.last_detection:
+            return
+        bad_entry = self.last_detection.get("bad_entry")
+        bad_idx = self.last_detection.get("bad_idx")
+        if not bad_entry:
+            self.status_label.setText('Generate: bad frame not found')
+            return
+        start_temp = float(bad_entry.temp_value)
+        if bad_idx is None or bad_idx <= 0:
+            anchor_temp = start_temp
+        else:
+            anchor_temp = float(self.entries[bad_idx].temp_value)
+        out_dir = make_output_dir(self.current_folder)
+        clear_output_dir(out_dir)
+        skip_temps = [
+            float(entry.temp_value)
+            for entry in self.entries
+            if float(entry.temp_value) < start_temp
+        ]
+        generated = generate_into_folder(
+            self.entries,
+            start_temp,
+            self.get_frame_i16,
+            out_dir,
+            degree=3,
+            step=1.25,
+            anchor_temp=anchor_temp,
+            end_temp=70.0,
+            skip_temps=skip_temps,
+        )
+        copy_original_entries(self.entries, self.current_folder, out_dir, start_temp)
+        self.status_label.setText(
+            f'Generate: wrote {len(generated)} raws from {anchor_temp:.2f} into {out_dir}'
+        )
+        self.add_folders([out_dir])
+
 
 def main():
     app = qt.QtWidgets.QApplication(sys.argv)
     qt.apply_light_theme(app)
     window = RawModesWindow()
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec())
 
 
