@@ -78,7 +78,7 @@ class TemperaturePlot(qt.QtWidgets.QWidget):
 
     def paintEvent(self, event):
         painter = qt.QtGui.QPainter(self)
-        painter.setRenderHint(qt.QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(qt.QtGui.QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
         base_color = self.palette().color(palette_role('Base'))
         text_color = self.palette().color(palette_role('Text'))
@@ -389,7 +389,7 @@ class InteractiveTemperaturePlot(qt.QtWidgets.QWidget):
 
     def paintEvent(self, event):
         painter = qt.QtGui.QPainter(self)
-        painter.setRenderHint(qt.QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(qt.QtGui.QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
         base_color = self.palette().color(palette_role('Base'))
         text_color = self.palette().color(palette_role('Text'))
@@ -504,7 +504,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
 
         left_panel = qt.QtWidgets.QWidget()
         left_layout = qt.QtWidgets.QVBoxLayout(left_panel)
-        left_panel.setSizePolicy(qt.QtWidgets.QSizePolicy.Expanding, qt.QtWidgets.QSizePolicy.Expanding)
+        left_panel.setSizePolicy(qt.QtWidgets.QSizePolicy.Policy.Expanding, qt.QtWidgets.QSizePolicy.Policy.Expanding)
 
         self.folder_tabs = qt.QtWidgets.QTabBar()
         self.folder_tabs.setMovable(True)
@@ -541,12 +541,30 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
 
         mode_label = qt.QtWidgets.QLabel('Mode:')
         right_layout.addWidget(mode_label)
+        mode_row = qt.QtWidgets.QWidget()
+        mode_row_layout = qt.QtWidgets.QHBoxLayout(mode_row)
+        mode_row_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.update_button = qt.QtWidgets.QToolButton()
+        self.update_button.setToolTip('Update view')
+        style = self.style()
+        icon = None
+        if hasattr(style, 'standardIcon') and hasattr(qt.QtWidgets.QStyle, 'StandardPixmap'):
+            icon = style.standardIcon(qt.QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+        if icon is not None:
+            self.update_button.setIcon(icon)
+        else:
+            self.update_button.setText('Update')
+        self.update_button.clicked.connect(self.update_tiles)
+        mode_row_layout.addWidget(self.update_button)
+
         self.mode_combo = qt.QtWidgets.QComboBox()
         for key in (MODE_RAW_LOCAL, MODE_RAW_GLOBAL, MODE_DIFF_MEAN):
             self.mode_combo.addItem(MODE_LABELS[key], key)
         self.mode_combo.addItem(MODE_LABELS[MODE_CALIB_INTERP], MODE_CALIB_INTERP)
         self.mode_combo.setCurrentIndex(self.mode_combo.count() - 1)
-        right_layout.addWidget(self.mode_combo)
+        mode_row_layout.addWidget(self.mode_combo, 1)
+        right_layout.addWidget(mode_row)
 
         plot_header = qt.QtWidgets.QWidget()
         plot_header_layout = qt.QtWidgets.QHBoxLayout(plot_header)
@@ -562,7 +580,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
             if hasattr(qt.QtWidgets.QStyle, 'StandardPixmap'):
                 icon = style.standardIcon(qt.QtWidgets.QStyle.StandardPixmap.SP_TitleBarMaxButton)
             else:
-                icon = style.standardIcon(qt.QtWidgets.QStyle.SP_TitleBarMaxButton)
+                icon = style.standardIcon(qt.QtWidgets.QStyle.StandardPixmap.SP_TitleBarMaxButton)
             self.plot_expand.setIcon(icon)
         else:
             self.plot_expand.setText('Open')
@@ -577,7 +595,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.detect_button.clicked.connect(self.detect_first_bad)
         right_layout.addWidget(self.detect_button)
 
-        self.generate_button = qt.QtWidgets.QPushButton('Generate (poly)')
+        self.generate_button = qt.QtWidgets.QPushButton('Generate')
         self.generate_button.clicked.connect(self.generate_from_detection)
         right_layout.addWidget(self.generate_button)
 
