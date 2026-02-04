@@ -1,6 +1,7 @@
 import math
 import os
 import sys
+from collections import OrderedDict
 
 import numpy as np
 
@@ -12,6 +13,7 @@ from calib_generate import (
     generate_into_folder,
     make_output_dir,
 )
+from ml_predict import build_features as ml_build_features, find_first_bad as ml_find_first_bad
 from raw_data import read_raw_int16, read_raw_uint16, scan_raws, scale_diff_signed, scale_uint16_to_uint8
 from std_calib import std_calib_lhe
 
@@ -19,6 +21,9 @@ from std_calib import std_calib_lhe
 DEFAULT_DATA_DIR = os.path.join(os.getcwd(), 'data')
 TILE_COLUMNS = 3
 PREVIEW_MAX = 240
+PREVIEW_STRIDE = 2
+PIXMAP_CACHE_LIMIT = 400
+FOLDER_CACHE_LIMIT = 4
 
 MODE_RAW_LOCAL = 'raw_local'
 MODE_RAW_GLOBAL = 'raw_global'
@@ -45,10 +50,45 @@ def to_qpixmap(frame_u8):
     return qt.QtGui.QPixmap.fromImage(image)
 
 
+def downsample_frame(frame, stride):
+    if stride <= 1:
+        return frame
+    return frame[::stride, ::stride]
+
+
 def palette_role(name):
     if hasattr(qt.QtGui.QPalette, name):
         return getattr(qt.QtGui.QPalette, name)
     return getattr(qt.QtGui.QPalette.ColorRole, name)
+
+
+try:
+    Signal = qt.QtCore.pyqtSignal
+except AttributeError:
+    Signal = qt.QtCore.Signal
+
+
+class TileRenderSignals(qt.QtCore.QObject):
+    result = Signal(int, object, int, object)
+    error = Signal(int, str, int)
+
+
+class TileRenderTask(qt.QtCore.QRunnable):
+    def __init__(self, index, generation, key, fn):
+        super().__init__()
+        self.index = index
+        self.generation = generation
+        self.key = key
+        self.fn = fn
+        self.signals = TileRenderSignals()
+
+    def run(self):
+        try:
+            frame_u8 = self.fn()
+        except Exception as exc:
+            self.signals.error.emit(self.index, str(exc), self.generation)
+        else:
+            self.signals.result.emit(self.index, frame_u8, self.generation, self.key)
 
 
 class TemperaturePlot(qt.QtWidgets.QWidget):
@@ -488,12 +528,24 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.duplicates = 0
         self.frame_cache = {}
         self.frame_cache_i16 = {}
+        self.preview_cache = {}
+        self.preview_cache_i16 = {}
         self.frame_shape = None
         self.pixmap_refs = []
+        self.pixmap_cache = OrderedDict()
         self.global_scale = None
         self.current_folder = None
         self.plot_window = None
         self.last_detection = None
+        self.ml_model = None
+        self.ml_model_path = os.path.join('data-ml', 'model.pkl')
+        self.tile_image_labels = []
+        self.render_generation = 0
+        self.render_pool = qt.QtCore.QThreadPool.globalInstance()
+        max_workers = min(8, os.cpu_count() or 4)
+        self.render_pool.setMaxThreadCount(max_workers)
+        self.folder_state = OrderedDict()
+        self.folder_cache_limit = FOLDER_CACHE_LIMIT
         self._build_ui()
         # Do not auto-open data folder; start with empty tabs.
 
@@ -595,6 +647,10 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.detect_button.clicked.connect(self.detect_first_bad)
         right_layout.addWidget(self.detect_button)
 
+        self.ml_check_button = qt.QtWidgets.QPushButton('ML Check')
+        self.ml_check_button.clicked.connect(self.ml_check)
+        right_layout.addWidget(self.ml_check_button)
+
         self.generate_button = qt.QtWidgets.QPushButton('Generate')
         self.generate_button.clicked.connect(self.generate_from_detection)
         right_layout.addWidget(self.generate_button)
@@ -668,7 +724,54 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         elif self.folder_tabs.currentIndex() == -1:
             self.folder_tabs.setCurrentIndex(0)
 
+    def _store_current_state(self):
+        if not self.current_folder:
+            return
+        state = {
+            "entries": self.entries,
+            "duplicates": self.duplicates,
+            "frame_cache": self.frame_cache,
+            "frame_cache_i16": self.frame_cache_i16,
+            "preview_cache": self.preview_cache,
+            "preview_cache_i16": self.preview_cache_i16,
+            "frame_shape": self.frame_shape,
+            "pixmap_cache": self.pixmap_cache,
+            "global_scale": self.global_scale,
+            "last_detection": self.last_detection,
+        }
+        self.folder_state[self.current_folder] = state
+        self.folder_state.move_to_end(self.current_folder)
+        while len(self.folder_state) > self.folder_cache_limit:
+            self.folder_state.popitem(last=False)
+
+    def _restore_state(self, folder):
+        state = self.folder_state.get(folder)
+        if not state:
+            return False
+        self.current_folder = folder
+        self.current_folder_label.setText(folder)
+        self.entries = state["entries"]
+        self.duplicates = state["duplicates"]
+        self.frame_cache = state["frame_cache"]
+        self.frame_cache_i16 = state["frame_cache_i16"]
+        self.preview_cache = state.get("preview_cache", {})
+        self.preview_cache_i16 = state.get("preview_cache_i16", {})
+        self.frame_shape = state["frame_shape"]
+        self.pixmap_cache = state.get("pixmap_cache", OrderedDict())
+        self.global_scale = state.get("global_scale")
+        self.last_detection = state.get("last_detection")
+        self.folder_state.move_to_end(folder)
+        self.temp_plot.set_temperatures([entry.temp_value for entry in self.entries])
+        if self.plot_window:
+            self.plot_window.set_temperatures([entry.temp_value for entry in self.entries])
+        self.update_tiles()
+        return True
+
     def load_folder(self, folder):
+        if folder != self.current_folder:
+            self._store_current_state()
+        if self._restore_state(folder):
+            return
         self.current_folder = folder
         self.current_folder_label.setText(folder)
         self.entries, self.duplicates = scan_raws(folder)
@@ -676,10 +779,13 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.temp_plot.set_temperatures([entry.temp_value for entry in self.entries])
         if self.plot_window:
             self.plot_window.set_temperatures([entry.temp_value for entry in self.entries])
-        self.frame_cache.clear()
-        self.frame_cache_i16.clear()
+        self.frame_cache = {}
+        self.frame_cache_i16 = {}
+        self.preview_cache = {}
+        self.preview_cache_i16 = {}
         self.frame_shape = None
         self.pixmap_refs = []
+        self.pixmap_cache = OrderedDict()
         self.global_scale = None
         self.update_tiles()
 
@@ -694,13 +800,17 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.duplicates = 0
         self.frame_cache.clear()
         self.frame_cache_i16.clear()
+        self.preview_cache.clear()
+        self.preview_cache_i16.clear()
         self.frame_shape = None
         self.pixmap_refs = []
+        self.pixmap_cache.clear()
         self.global_scale = None
         self.temp_plot.set_temperatures([])
         if self.plot_window:
             self.plot_window.set_temperatures([])
         self.last_detection = None
+        self.tile_image_labels = []
         self.clear_tiles()
         self.status_label.setText('No folders opened.')
 
@@ -740,12 +850,32 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.frame_cache_i16[entry.path] = frame
         return frame
 
+    def get_preview_frame(self, entry):
+        if PREVIEW_STRIDE <= 1:
+            return self.get_frame(entry)
+        if entry.path in self.preview_cache:
+            return self.preview_cache[entry.path]
+        frame = self.get_frame(entry)
+        preview = downsample_frame(frame, PREVIEW_STRIDE)
+        self.preview_cache[entry.path] = preview
+        return preview
+
+    def get_preview_frame_i16(self, entry):
+        if PREVIEW_STRIDE <= 1:
+            return self.get_frame_i16(entry)
+        if entry.path in self.preview_cache_i16:
+            return self.preview_cache_i16[entry.path]
+        frame = self.get_frame_i16(entry)
+        preview = downsample_frame(frame, PREVIEW_STRIDE)
+        self.preview_cache_i16[entry.path] = preview
+        return preview
+
     def compute_global_scale(self, entries):
         if self.global_scale is not None:
             return self.global_scale
         samples = []
         for entry in entries:
-            frame = self.get_frame(entry)
+            frame = self.get_preview_frame(entry)
             samples.append(frame[::8, ::8].ravel())
         merged = np.concatenate(samples)
         p1 = np.percentile(merged, 1)
@@ -755,29 +885,24 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.global_scale = (p1, p99)
         return self.global_scale
 
-
-    def render_tile(self, entries, index):
-        mode = self.mode_combo.currentData()
-        entry_prev = entries[index]
-        entry_curr = entries[index + 1]
-        entry_next = entries[index + 2]
-        frame_i = self.get_frame(entry_prev)
-        frame_j = self.get_frame(entry_curr)
-        frame_k = self.get_frame(entry_next)
+    def _render_tile_data(self, entry_prev, entry_curr, entry_next, mode, global_scale):
+        frame_i = self.get_preview_frame(entry_prev)
+        frame_j = self.get_preview_frame(entry_curr)
+        frame_k = self.get_preview_frame(entry_next)
 
         if mode == MODE_RAW_LOCAL:
             frame_u8 = scale_uint16_to_uint8(frame_i)
         elif mode == MODE_RAW_GLOBAL:
-            p1, p99 = self.compute_global_scale(entries)
+            p1, p99 = global_scale if global_scale is not None else self.compute_global_scale(self.entries)
             frame_u8 = scale_uint16_to_uint8(frame_i, p1, p99)
         elif mode == MODE_DIFF_MEAN:
             mean = (frame_i.astype(np.float32) + frame_j.astype(np.float32) + frame_k.astype(np.float32)) / 3.0
             diff = frame_i.astype(np.float32) - mean
             frame_u8 = scale_diff_signed(diff)
         elif mode == MODE_CALIB_INTERP:
-            frame_prev = self.get_frame_i16(entry_prev)
-            frame_curr = self.get_frame_i16(entry_curr)
-            frame_next = self.get_frame_i16(entry_next)
+            frame_prev = self.get_preview_frame_i16(entry_prev)
+            frame_curr = self.get_preview_frame_i16(entry_curr)
+            frame_next = self.get_preview_frame_i16(entry_next)
             frame_u8 = std_calib_lhe(
                 frame_prev,
                 frame_curr,
@@ -788,8 +913,51 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
             )
         else:
             frame_u8 = scale_uint16_to_uint8(frame_i)
+        return frame_u8
 
-        return to_qpixmap(frame_u8)
+    def _tile_cache_key(self, mode, entry_prev, entry_curr, entry_next, global_scale):
+        scale_key = None
+        if mode == MODE_RAW_GLOBAL and global_scale is not None:
+            scale_key = (float(global_scale[0]), float(global_scale[1]))
+        return (
+            mode,
+            entry_prev.path,
+            entry_curr.path,
+            entry_next.path,
+            scale_key,
+            PREVIEW_STRIDE,
+        )
+
+    def _get_cached_pixmap(self, key):
+        pixmap = self.pixmap_cache.get(key)
+        if pixmap is not None:
+            self.pixmap_cache.move_to_end(key)
+        return pixmap
+
+    def _cache_pixmap(self, key, pixmap):
+        self.pixmap_cache[key] = pixmap
+        self.pixmap_cache.move_to_end(key)
+        while len(self.pixmap_cache) > PIXMAP_CACHE_LIMIT:
+            self.pixmap_cache.popitem(last=False)
+
+    def _handle_tile_result(self, index, frame_u8, generation, key):
+        if generation != self.render_generation:
+            return
+        if index >= len(self.tile_image_labels):
+            return
+        pixmap = to_qpixmap(frame_u8)
+        self._cache_pixmap(key, pixmap)
+        label = self.tile_image_labels[index]
+        label.setPixmap(pixmap)
+        self.pixmap_refs.append(pixmap)
+
+    def _handle_tile_error(self, index, message, generation):
+        if generation != self.render_generation:
+            return
+        if index >= len(self.tile_image_labels):
+            return
+        label = self.tile_image_labels[index]
+        label.setText(f'Preview error: {message}')
 
     def clear_tiles(self):
         while self.tile_layout.count():
@@ -801,7 +969,8 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
     def update_tiles(self):
         self.clear_tiles()
         self.pixmap_refs = []
-        self.global_scale = None
+        self.tile_image_labels = []
+        self.render_generation += 1
 
         selected = self.get_selected_entries()
         tiles = max(0, len(selected) - 2)
@@ -811,6 +980,11 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
                 status += f' | duplicate temps: {self.duplicates}'
             self.status_label.setText(status)
             return
+
+        mode = self.mode_combo.currentData()
+        global_scale = None
+        if mode == MODE_RAW_GLOBAL:
+            global_scale = self.compute_global_scale(selected)
 
         for i in range(tiles):
             label_text = (
@@ -824,22 +998,37 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
             tile_layout = qt.QtWidgets.QVBoxLayout(tile)
             tile_layout.setContentsMargins(4, 4, 4, 4)
 
-            try:
-                pixmap = self.render_tile(selected, i)
-                image_label = qt.QtWidgets.QLabel()
-                image_label.setAlignment(qt.align_center())
-                image_label.setPixmap(pixmap)
-                tile_layout.addWidget(image_label)
-                self.pixmap_refs.append(pixmap)
-            except Exception as exc:
-                error_label = qt.QtWidgets.QLabel(f'Preview error: {exc}')
-                tile_layout.addWidget(error_label)
+            image_label = qt.QtWidgets.QLabel('Loading...')
+            image_label.setAlignment(qt.align_center())
+            tile_layout.addWidget(image_label)
+            self.tile_image_labels.append(image_label)
 
             caption = qt.QtWidgets.QLabel(label_text)
             caption.setAlignment(qt.align_center())
             tile_layout.addWidget(caption)
 
             self.tile_layout.addWidget(tile, i // TILE_COLUMNS, i % TILE_COLUMNS)
+
+        generation = self.render_generation
+        for i in range(tiles):
+            entry_prev = selected[i]
+            entry_curr = selected[i + 1]
+            entry_next = selected[i + 2]
+            key = self._tile_cache_key(mode, entry_prev, entry_curr, entry_next, global_scale)
+            pixmap = self._get_cached_pixmap(key)
+            if pixmap is not None:
+                label = self.tile_image_labels[i]
+                label.setPixmap(pixmap)
+                self.pixmap_refs.append(pixmap)
+                continue
+
+            def compute(prev=entry_prev, curr=entry_curr, nxt=entry_next, m=mode, scale=global_scale):
+                return self._render_tile_data(prev, curr, nxt, m, scale)
+
+            task = TileRenderTask(i, generation, key, compute)
+            task.signals.result.connect(self._handle_tile_result)
+            task.signals.error.connect(self._handle_tile_error)
+            self.render_pool.start(task)
 
         status = f'Raw files: {len(self.entries)} | selected: {len(selected)} | tiles: {tiles}'
         mode_label = MODE_LABELS.get(self.mode_combo.currentData(), self.mode_combo.currentText())
@@ -923,6 +1112,32 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
             f'Generate: wrote {len(generated)} raws from {anchor_temp:.2f} into {out_dir}'
         )
         self.add_folders([out_dir])
+
+    def ml_check(self):
+        if not self.current_folder or not self.entries:
+            self.status_label.setText('ML: no folder loaded')
+            return
+        if self.ml_model is None:
+            try:
+                import pickle
+
+                with open(self.ml_model_path, 'rb') as handle:
+                    payload = pickle.load(handle)
+                self.ml_model = payload['model']
+            except Exception as exc:
+                self.status_label.setText(f'ML: failed to load model ({exc})')
+                return
+
+        features, temps = ml_build_features(self.entries)
+        if not features:
+            self.status_label.setText('ML: not enough frames')
+            return
+        probs = self.ml_model.predict_proba(np.array(features))[:, 0]
+        bad_temp, bad_prob = ml_find_first_bad(temps, probs, threshold=0.5, start_temp=50.0)
+        if bad_temp is None:
+            self.status_label.setText('ML: no bad frames detected')
+        else:
+            self.status_label.setText(f'ML: bad from {bad_temp:.2f} (prob {bad_prob:.3f})')
 
 
 def main():
