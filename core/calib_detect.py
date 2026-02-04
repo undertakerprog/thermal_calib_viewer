@@ -1,6 +1,6 @@
 import numpy as np
 
-from std_calib import blend_fixed
+from core.std_calib import blend_fixed
 
 
 MAD_SCALE = 1.4826

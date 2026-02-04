@@ -2,23 +2,25 @@ import math
 import os
 import sys
 from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 
-import qt_compat as qt
-from calib_detect import detect_bad
-from calib_generate import (
+from gui import qt_compat as qt
+from core.calib_detect import detect_bad
+from core.calib_generate import (
     clear_output_dir,
     copy_original_entries,
     generate_into_folder,
     make_output_dir,
 )
-from ml_predict import build_features as ml_build_features, find_first_bad as ml_find_first_bad
-from raw_data import read_raw_int16, read_raw_uint16, scan_raws, scale_diff_signed, scale_uint16_to_uint8
-from std_calib import std_calib_lhe
+from ml.ml_predict import build_features as ml_build_features, find_first_bad as ml_find_first_bad
+from core.raw_data import read_raw_int16, read_raw_uint16, scan_raws, scale_diff_signed, scale_uint16_to_uint8
+from core.std_calib import std_calib_lhe
 
 
-DEFAULT_DATA_DIR = os.path.join(os.getcwd(), 'data')
+BASE_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_DATA_DIR = str(BASE_DIR / 'data')
 TILE_COLUMNS = 3
 PREVIEW_MAX = 240
 PREVIEW_STRIDE = 2
@@ -538,7 +540,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.plot_window = None
         self.last_detection = None
         self.ml_model = None
-        self.ml_model_path = os.path.join('data-ml', 'model.pkl')
+        self.ml_model_path = str(BASE_DIR / 'data-ml' / 'model.pkl')
         self.tile_image_labels = []
         self.render_generation = 0
         self.render_pool = qt.QtCore.QThreadPool.globalInstance()
