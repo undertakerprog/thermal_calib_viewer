@@ -1,18 +1,23 @@
 import math
 import os
 import sys
+from decimal import Decimal, ROUND_HALF_UP
 from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
 
 from gui import qt_compat as qt
+from gui.manual_calib_window import ManualCalibrationWindow
 from core.calib_detect import detect_bad
 from core.calib_generate import (
     clear_output_dir,
     copy_original_entries,
+    copy_original_entries_from,
+    generate_poly_at_temps,
     generate_into_folder,
     make_output_dir,
+    write_generated_frames,
 )
 from ml.ml_predict import build_features as ml_build_features, find_first_bad as ml_find_first_bad
 from core.raw_data import read_raw_int16, read_raw_uint16, scan_raws, scale_diff_signed, scale_uint16_to_uint8
@@ -538,6 +543,7 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.global_scale = None
         self.current_folder = None
         self.plot_window = None
+        self.manual_window = None
         self.last_detection = None
         self.ml_model = None
         self.ml_model_path = str(BASE_DIR / 'data-ml' / 'model.pkl')
@@ -656,6 +662,10 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.generate_button = qt.QtWidgets.QPushButton('Generate')
         self.generate_button.clicked.connect(self.generate_from_detection)
         right_layout.addWidget(self.generate_button)
+
+        self.manual_button = qt.QtWidgets.QPushButton('Manual calib')
+        self.manual_button.clicked.connect(self.open_manual_calibration)
+        right_layout.addWidget(self.manual_button)
 
         self.status_label = qt.QtWidgets.QLabel('')
         right_layout.addWidget(self.status_label)
@@ -779,6 +789,8 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.entries, self.duplicates = scan_raws(folder)
         self.last_detection = None
         self.temp_plot.set_temperatures([entry.temp_value for entry in self.entries])
+        if self.manual_window:
+            self.manual_window.set_temperatures([entry.temp_value for entry in self.entries])
         if self.plot_window:
             self.plot_window.set_temperatures([entry.temp_value for entry in self.entries])
         self.frame_cache = {}
@@ -809,6 +821,8 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         self.pixmap_cache.clear()
         self.global_scale = None
         self.temp_plot.set_temperatures([])
+        if self.manual_window:
+            self.manual_window.set_temperatures([])
         if self.plot_window:
             self.plot_window.set_temperatures([])
         self.last_detection = None
@@ -826,6 +840,22 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
 
     def _clear_plot_window(self):
         self.plot_window = None
+
+    def open_manual_calibration(self):
+        if not self.entries:
+            self.status_label.setText('Manual: no folder loaded')
+            return
+        if self.manual_window is None:
+            self.manual_window = ManualCalibrationWindow(parent=self)
+            self.manual_window.apply_request.connect(self.apply_manual_calibration)
+            self.manual_window.finished.connect(self._clear_manual_window)
+        self.manual_window.set_temperatures([entry.temp_value for entry in self.entries])
+        self.manual_window.show()
+        self.manual_window.raise_()
+        self.manual_window.activateWindow()
+
+    def _clear_manual_window(self):
+        self.manual_window = None
 
     def get_selected_entries(self):
         return list(self.entries)
@@ -1112,6 +1142,83 @@ class RawModesWindow(qt.QtWidgets.QMainWindow):
         copy_original_entries(self.entries, self.current_folder, out_dir, start_temp)
         self.status_label.setText(
             f'Generate: wrote {len(generated)} raws from {anchor_temp:.2f} into {out_dir}'
+        )
+        self.add_folders([out_dir])
+
+    def apply_manual_calibration(self, config):
+        if not self.current_folder or not self.entries:
+            self.status_label.setText('Manual: no folder loaded')
+            return
+        mode = config.get('mode')
+
+        all_temps = [float(entry.temp_value) for entry in self.entries]
+        if not all_temps:
+            self.status_label.setText('Manual: no temperatures')
+            return
+        from_temp = config.get('from_temp')
+        if from_temp is None:
+            from_temp = min(all_temps)
+        to_value = config.get('to_temp')
+        to_temp = max(all_temps) if to_value is None else float(to_value)
+        if from_temp >= to_temp:
+            self.status_label.setText('Manual: invalid range (from must be lower than to)')
+            return
+
+        fit_entries = [
+            entry
+            for entry in self.entries
+            if from_temp <= float(entry.temp_value) <= to_temp
+        ]
+        if len(fit_entries) < 4:
+            self.status_label.setText('Manual: not enough points in fit range (need at least 4)')
+            return
+
+        out_dir = make_output_dir(self.current_folder)
+        clear_output_dir(out_dir)
+        if mode == 'tail':
+            generated = generate_into_folder(
+                fit_entries,
+                start_temp=to_temp,
+                get_frame_i16=self.get_frame_i16,
+                output_folder=out_dir,
+                degree=3,
+                step=1.25,
+                anchor_temp=to_temp,
+                end_temp=70.0,
+                skip_temps=None,
+            )
+            copy_original_entries(self.entries, self.current_folder, out_dir, to_temp)
+            self.status_label.setText(
+                f'Manual tail: wrote {len(generated)} raws | fit {from_temp:.2f}..{to_temp:.2f} | out {out_dir}'
+            )
+            self.add_folders([out_dir])
+            return
+
+        target_temps = sorted(
+            {
+                float(Decimal(str(entry.temp_value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+                for entry in self.entries
+                if float(entry.temp_value) < from_temp
+            }
+        )
+        if not target_temps:
+            self.status_label.setText('Manual head: nothing to regenerate before From')
+            copy_original_entries_from(self.entries, self.current_folder, out_dir, from_temp)
+            self.add_folders([out_dir])
+            return
+        generated = generate_poly_at_temps(
+            fit_entries,
+            target_temps,
+            self.get_frame_i16,
+            degree=3,
+        )
+        if not generated:
+            self.status_label.setText('Manual head: generation failed (insufficient fit data)')
+            return
+        write_generated_frames(out_dir, generated)
+        copy_original_entries_from(self.entries, self.current_folder, out_dir, from_temp)
+        self.status_label.setText(
+            f'Manual head: wrote {len(generated)} raws | fit {from_temp:.2f}..{to_temp:.2f} | out {out_dir}'
         )
         self.add_folders([out_dir])
 

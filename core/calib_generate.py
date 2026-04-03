@@ -111,6 +111,35 @@ def generate_poly_frames(
     return out
 
 
+def generate_poly_at_temps(
+    entries_for_fit,
+    target_temps,
+    get_frame_i16,
+    degree=3,
+):
+    if not entries_for_fit or not target_temps:
+        return {}
+    if len(entries_for_fit) < degree + 1:
+        return {}
+    fit_temps = [float(entry.temp_value) for entry in entries_for_fit]
+    fit_frames = [get_frame_i16(entry).astype(np.float32) for entry in entries_for_fit]
+    coeffs, shape = _fit_poly(fit_temps, fit_frames, degree)
+    out = {}
+    for temp in target_temps:
+        t = float(_quantize_temp(temp))
+        frame = _eval_poly(coeffs, shape, t)
+        out[t] = np.rint(frame).astype(np.int16)
+    return out
+
+
+def write_generated_frames(output_folder, generated):
+    for temp, frame in generated.items():
+        temp_str = f"{temp:.2f}"
+        name = f"calib__{temp_str}_{convert_celsius_to_adc(temp)}.raw"
+        out_path = os.path.join(output_folder, name)
+        write_fpa_image(out_path, frame, temp)
+
+
 def make_output_dir(folder):
     parent = os.path.dirname(folder.rstrip("\\/"))
     name = os.path.basename(folder.rstrip("\\/"))
@@ -157,11 +186,7 @@ def generate_into_folder(
         degree=degree,
         skip_temps=skip_temps,
     )
-    for temp, frame in generated.items():
-        temp_str = f"{temp:.2f}"
-        name = f"calib__{temp_str}_{convert_celsius_to_adc(temp)}.raw"
-        out_path = os.path.join(output_folder, name)
-        write_fpa_image(out_path, frame, temp)
+    write_generated_frames(output_folder, generated)
     return generated
 
 
@@ -177,6 +202,25 @@ def clear_output_dir(folder):
 def copy_original_entries(entries, src_root, dst_root, max_temp):
     for entry in entries:
         if float(entry.temp_value) >= max_temp:
+            continue
+        src_raw = entry.path
+        rel = os.path.relpath(src_raw, src_root)
+        dst_raw = os.path.join(dst_root, rel)
+        os.makedirs(os.path.dirname(dst_raw), exist_ok=True)
+        shutil.copy2(src_raw, dst_raw)
+
+        base, _ = os.path.splitext(src_raw)
+        src_txt = base + ".txt"
+        if os.path.exists(src_txt):
+            rel_txt = os.path.relpath(src_txt, src_root)
+            dst_txt = os.path.join(dst_root, rel_txt)
+            os.makedirs(os.path.dirname(dst_txt), exist_ok=True)
+            shutil.copy2(src_txt, dst_txt)
+
+
+def copy_original_entries_from(entries, src_root, dst_root, min_temp):
+    for entry in entries:
+        if float(entry.temp_value) < min_temp:
             continue
         src_raw = entry.path
         rel = os.path.relpath(src_raw, src_root)
